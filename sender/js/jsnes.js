@@ -7125,12 +7125,13 @@ if (typeof jQuery !== 'undefined') {
                     return this.dynamicaudio.writeInt(samples);
                 },
             
-                writeFrame: function(buffer, prevBuffer) {                                         
-                   if(this.alternate%this.frameNum == 0) {
-                        var data = this.screen[0].toDataURL("image/webp",this.quality);                    
-                        var json = {"type": "writeFrame", "frame":data};   
-                        cast_api.sendMessage(cv_activity.activityId, "Test", json);
-                    }                    
+                writeFrame: function(buffer, prevBuffer) {
+                    console.log('webrtc: ' + USE_WEBRTC);
+                    if (USE_WEBRTC == false && this.alternate%this.frameNum == 0 && !!currentSession) {
+                        var data = this.screen[0].toDataURL("image/webp",this.quality);
+                        var json = {"type": "writeFrame", "frame":data};
+                        currentSession.sendMessage(namespace, json);
+                    }
 
                     this.alternate++;
 

@@ -1,49 +1,51 @@
 <html data-cast-api-enabled="true">
-  <head>
-    <title>chromecast-nes</title>
-  </head>  
-  <link rel="stylesheet" type="text/css" href="css/style.css"> 
-  <body>
-    <div class="nes">Loading...</div>    
-  </body>
+
+<head>
+  <title>chromecast-nes</title>
+</head>
+<link rel="stylesheet" type="text/css" href="css/style.css">
+
+<body>
+  <div class='center-column-flex'>
+    <section>
+      <h1>Choose casting device</h1>
+      <div style="width: 44px; height: 44px;">
+        <google-cast-launcher></google-cast-launcher>
+      </div>
+    </section>
+  </div>
+</body>
 <script src="js/jquery-1.4.2.min.js"></script>
 <script src="js/dynamicaudio-min.js"></script>
 <script src="js/jsnes.js"></script>
+<script src="js/peerjs.min.js"></script>
+
 <script>
+  const applicationId = 'F1F2B4A5';
+  const namespace = 'urn:x-cast:se.patrikkarlsson.cast.snes-cast';
+  const USE_WEBRTC = true;
 
-  var cast_api, cv_activity;
-  var jsnes;
+  let castPeerId;
+  let castMediaConnection;
+  let myPeer;
+  let localStream;
 
-  $(function() {
-  // Wait for API to post a message to us
-  window.addEventListener("message", function(event) {
-    if (event.source == window && event.data && 
-      event.data.source == "CastApi" &&
-      event.data.event == "Hello")
-      initializeApi();
-  });
+  let castContext;
+  let currentSession;
 
-  initializeApi = function() {
-    cast_api = new cast.Api();
-    //could not get a receiver to popup in the receiverList using my APP ID to using "YouTube" works just fine
-    cast_api.addReceiverListener("YouTube", onReceiverList);
-  };
+  let jsnes;
+  let ui;
+  
+  $(function () {
+    console.log('initializing peer');
+    myPeer = new Peer();
+    myPeer.on('open', onOpen);
+    myPeer.on('call', onCall);
+    myPeer.on('close', onClose);
+    myPeer.on('disconnected', onDisconnected);
+    myPeer.on('error', onError);
+    myPeer.connect();
 
-  onReceiverList = function(list) {
-    if(list.length > 0) {
-     doLaunch(list[0]);
-   }
-//
-};
-doLaunch = function(receiver) {
-  var request = new cast.LaunchRequest("YOUR APP ID HERE", receiver);
-  cast_api.launch(request, onLaunch);
-};
-
-onLaunch = function(activity) {
-  if (activity.status == "running") {
-    console.log("running");
-    cv_activity = activity;
     jsnes = new JSNES({
       'swfPath': '/swf/',
       'ui': $('.nes').text('').JSNESUI({
@@ -51,19 +53,129 @@ onLaunch = function(activity) {
           ['Sir Ababol', 'roms/ababol.nes']
         ],
       }),
-    });    
-      var canvas = $(".nes-screen")[0];
-      console.log(canvas);
+    });
 
-      var json = {"type": "writeFrame", "frame":canvas.toDataURL()};     
-      cast_api.sendMessage(cv_activity.activityId, "Test", json);     
-      
-  } else if (activity.status == "error") {
-    cv_activity = null;
-    console.log("error");
+    ui = jsnes.ui;
+    document.body.appendChild(ui.root[0]);
+  });
+
+  window['__onGCastApiAvailable'] = function (isAvailable) {
+    if (isAvailable) {
+      initializeCastApi();
+    }
+  };
+
+  const initializeCastApi = function () {
+    castContext = cast.framework.CastContext.getInstance();
+    cast.framework.setLoggerLevel(cast.framework.LoggerLevel.DEBUG);
+    castContext.setOptions({
+      receiverApplicationId: applicationId,
+      autoJoinPolicy: chrome.cast.AutoJoinPolicy.ORIGIN_SCOPED
+    });
+    castContext.addEventListener(cast.framework.CastContextEventType.CAST_STATE_CHANGED, onCastStateChanged);
+    castContext.addEventListener(cast.framework.CastContextEventType.SESSION_STATE_CHANGED, onSessionStateChanged);
+  };
+
+  const onCastStateChanged = (event) => {
+    console.log(event.data);
+  };
+
+  const onSessionStateChanged = (event) => {
+    console.log(event);
+    if (event.sessionState === cast.framework.SessionState.SESSION_STARTED && event.session) {
+      console.log('started');
+      currentSession = event.session;
+      currentSession.addMessageListener(namespace, onCustomMessage);
+      launch();
+    } else if (event.sessionState === cast.framework.SessionState.SESSION_START_FAILED) {
+      console.log('failed to start session :(');
+    } else if (event.sessionState === cast.framework.SessionState.SESSION_ENDED) {
+      cleanup();
+    }
+  };
+
+  const onCustomMessage = (recievedNameSpace, message) => {
+    if (recievedNameSpace !== namespace) {
+      console.error('unexpected namespace');
+      return;
+    }
+    let parsedMessage = JSON.parse(message);
+    console.log('Recieved message: ' + parsedMessage);
+
+    if (parsedMessage.type == 'castPeerId') {
+        setCastPeerId(parsedMessage.peerId);
+    } else {
+      console.log('unhandled custom message');
+      console.log(message);
+    }
+  };
+
+  const getCastPeerId = () => {
+    if (currentSession) {
+      currentSession.sendMessage(namespace, { type: 'sendPeerId' }); 
+    }
+  };
+
+  const setCastPeerId = (id) => {
+    castPeerId = id;
+    if (castPeerId && !castMediaConnection && localStream) {
+      castMediaConnection = myPeer.call(castPeerId, localStream);
+      // TODO: set event handlers
+    }
   }
-};
 
-});
+  const launch = function () {
+    if (currentSession) {
+      console.log("running");
+
+      // jsnes.loadRom();
+      //jsnes.start();
+      var canvas = $(".nes-screen")[0]; // TODO: offscreen rendering
+      localStream = canvas.captureStream();
+      getCastPeerId();
+
+      // var json = { "type": "writeFrame", "frame": canvas.toDataURL() };
+      // console.log('sending image');
+      // currentSession.sendMessage(namespace, json);
+    } else if (jsnes) {
+      cleanup();
+    }
+  };
+
+  const onCall = (mediaConn) => {
+    console.error("called, we shouldn't be called..");
+  };
+
+  const onOpen = (id) => {
+    console.log('Connected to Peer-server with id: ' + id);
+  };
+
+  const onClose = () => {
+    console.log('Closed');
+    cleanup();
+    myPeer.destroy();
+  };
+
+  const onDisconnected = () => {
+    console.log('disconnected');
+    if (!castPeerId) {
+      myPeer.reconnect();
+    }
+  };
+
+  const onError = error => {
+    console.log(error);
+  };
+
+  const cleanup = () => {
+    console.log('Cleaning up');
+    castPeerId = null;
+    jsnes.stop();
+    if (currentSession) {
+      currentSession.removeMessageListener(namespace, onCustomMessage);
+    }
+  };
 </script>
+<script src="https://www.gstatic.com/cv/js/sender/v1/cast_sender.js?loadCastFramework=1"></script>
+
 </html>
